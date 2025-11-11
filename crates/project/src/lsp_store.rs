@@ -6958,8 +6958,7 @@ impl LspStore {
                     return;
                 }
 
-                let mut unchanged_buffers = HashSet::default();
-                let mut changed_buffers = HashSet::default();
+                let mut unchanged_buffers = HashMap::default();
                 let server_diagnostics_updates = diagnostics
                     .into_iter()
                     .filter_map(|diagnostics_set| match diagnostics_set {
@@ -6967,24 +6966,25 @@ impl LspStore {
                             server_id,
                             uri,
                             diagnostics,
-                        } => Some((server_id, uri, diagnostics)),
+                            registration_id,
+                        } => Some((server_id, uri, diagnostics, registration_id)),
                         LspPullDiagnostics::Default => None,
                     })
                     .fold(
                         HashMap::default(),
-                        |mut acc, (server_id, uri, diagnostics)| {
+                        |mut acc, (server_id, uri, diagnostics, new_registration_id)| {
                             let (result_id, diagnostics) = match diagnostics {
                                 PulledDiagnostics::Unchanged { result_id } => {
-                                    unchanged_buffers.insert(uri.clone());
+                                    unchanged_buffers
+                                        .entry(new_registration_id.clone())
+                                        .or_insert_with(HashSet::default)
+                                        .insert(uri.clone());
                                     (Some(result_id), Vec::new())
                                 }
                                 PulledDiagnostics::Changed {
                                     result_id,
                                     diagnostics,
-                                } => {
-                                    changed_buffers.insert(uri.clone());
-                                    (result_id, diagnostics)
-                                }
+                                } => (result_id, diagnostics),
                             };
                             let disk_based_sources = Cow::Owned(
                                 lsp_store
@@ -6994,8 +6994,11 @@ impl LspStore {
                                     .unwrap_or(&[])
                                     .to_vec(),
                             );
-                            acc.entry(server_id).or_insert_with(Vec::new).push(
-                                DocumentDiagnosticsUpdate {
+                            acc.entry(server_id)
+                                .or_insert_with(HashMap::default)
+                                .entry(new_registration_id.clone())
+                                .or_insert_with(Vec::new)
+                                .push(DocumentDiagnosticsUpdate {
                                     server_id,
                                     diagnostics: lsp::PublishDiagnosticsParams {
                                         uri,
@@ -7004,8 +7007,7 @@ impl LspStore {
                                     },
                                     result_id,
                                     disk_based_sources,
-                                },
-                            );
+                                });
                             acc
                         },
                     );
@@ -7021,15 +7023,18 @@ impl LspStore {
                                         let abs_path = file.as_local()?.abs_path(cx);
                                         lsp::Uri::from_file_path(abs_path).ok()
                                     })
-                                    .is_none_or(|buffer_uri| {
-                                        unchanged_buffers.contains(&buffer_uri)
-                                            || match old_diagnostic.source_kind {
-                                                DiagnosticSourceKind::Pulled => {
-                                                    !changed_buffers.contains(&buffer_uri)
+                                    .is_none_or(|buffer_uri| match old_diagnostic.source_kind {
+                                        DiagnosticSourceKind::Pulled => {
+                                            match &old_diagnostic.registration_id {
+                                                Some(old_registration_id) => {
+                                                    old_registration_id != registration_id
+                                                        || unchanged_buffers.contains(&buffer_uri)
                                                 }
-                                                DiagnosticSourceKind::Other
-                                                | DiagnosticSourceKind::Pushed => true,
+                                                None => true,
                                             }
+                                        }
+                                        DiagnosticSourceKind::Other
+                                        | DiagnosticSourceKind::Pushed => true,
                                     })
                             },
                             cx,
@@ -10864,6 +10869,7 @@ impl LspStore {
                         is_unnecessary,
                         underline,
                         data: diagnostic.data.clone(),
+                        registration_id: diagnostic.registration_id.clone(),
                     },
                 });
                 if let Some(infos) = &diagnostic.related_information {
@@ -10891,6 +10897,7 @@ impl LspStore {
                                     is_unnecessary: false,
                                     underline,
                                     data: diagnostic.data.clone(),
+                                    registration_id: diagnostic.registration_id.clone(),
                                 },
                             });
                         }
@@ -11730,6 +11737,7 @@ impl LspStore {
                         server_id,
                         uri,
                         diagnostics,
+                        // registration_id: report.
                     } => Some((server_id, uri, diagnostics, workspace_diagnostics.version)),
                     LspPullDiagnostics::Default => None,
                 },

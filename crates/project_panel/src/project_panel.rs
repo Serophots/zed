@@ -7,7 +7,7 @@ use collections::{BTreeSet, HashMap, hash_map};
 use command_palette_hooks::CommandPaletteFilter;
 use db::kvp::KEY_VALUE_STORE;
 use editor::{
-    Editor, EditorEvent,
+    Editor, EditorEvent, MultiBufferOffset,
     items::{
         entry_diagnostic_aware_icon_decoration_and_color,
         entry_diagnostic_aware_icon_name_and_color, entry_git_aware_label_color,
@@ -1887,7 +1887,9 @@ impl ProjectPanel {
                 self.filename_editor.update(cx, |editor, cx| {
                     editor.set_text(file_name, window, cx);
                     editor.change_selections(Default::default(), window, cx, |s| {
-                        s.select_ranges([selection])
+                        s.select_ranges([
+                            MultiBufferOffset(selection.start)..MultiBufferOffset(selection.end)
+                        ])
                     });
                     window.focus(&editor.focus_handle(cx));
                 });

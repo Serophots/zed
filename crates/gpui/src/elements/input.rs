@@ -815,7 +815,14 @@ fn paint_multiline_placeholder(
         .text_system()
         .shape_line(placeholder.clone(), font_size, &[run], None);
     let line_height = text_style.line_height_in_pixels(window.rem_size());
-    let _ = shaped_line.paint(bounds.origin, line_height, window, cx);
+    let _ = shaped_line.paint(
+        bounds.origin,
+        line_height,
+        TextAlign::Left,
+        None,
+        window,
+        cx,
+    );
 }
 
 fn paint_multiline_text(
@@ -1209,7 +1216,7 @@ fn paint_singleline_placeholder(
     let y_offset = (bounds.size.height - line_height).max(px(0.)) / 2.0;
     let paint_origin = point(bounds.origin.x, bounds.origin.y + y_offset);
 
-    let _ = shaped_line.paint(paint_origin, line_height, window, cx);
+    let _ = shaped_line.paint(paint_origin, line_height, TextAlign::Left, None, window, cx);
 }
 
 fn paint_singleline_text(

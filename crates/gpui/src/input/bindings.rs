@@ -1,4 +1,4 @@
-use crate::{App, KeyBinding, actions};
+use crate::{App, KeyBinding};
 
 actions!(
     input,

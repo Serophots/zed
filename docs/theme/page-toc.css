@@ -5,8 +5,8 @@
   display: flex;
   flex-direction: column;
   gap: 4px;
-  width: 220px;
   padding: 28px 0 120px 0;
+  width: 200px;
   max-height: calc(100svh - 50px);
   overflow-x: hidden;
 }
@@ -60,7 +60,19 @@
   color: var(--full-contrast);
 }
 
-@media only screen and (max-width: 1020px) {
+.toc-container {
+  visibility: hidden;
+}
+
+.toc-container.has-toc {
+  visibility: visible;
+}
+
+.toc-container.no-toc {
+  display: none;
+}
+
+@media only screen and (max-width: 1200px) {
   .toc-container {
     display: none;
   }

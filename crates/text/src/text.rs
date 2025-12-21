@@ -39,6 +39,7 @@ pub use subscription::*;
 pub use sum_tree::Bias;
 use sum_tree::{Dimensions, FilterCursor, SumTree, TreeMap, TreeSet};
 use undo_map::UndoMap;
+use util::debug_panic;
 
 #[cfg(any(test, feature = "test-support"))]
 use util::RandomCharIter;
@@ -2435,19 +2436,33 @@ impl BufferSnapshot {
         self.anchor_at_offset(position.to_offset(self), bias)
     }
 
-    fn anchor_at_offset(&self, offset: usize, bias: Bias) -> Anchor {
+    fn anchor_at_offset(&self, mut offset: usize, bias: Bias) -> Anchor {
         if bias == Bias::Left && offset == 0 {
             Anchor::min_for_buffer(self.remote_id)
-        } else if bias == Bias::Right && offset == self.len() {
+        } else if bias == Bias::Right
+            && ((!cfg!(debug_assertions) && offset >= self.len()) || offset == self.len())
+        {
             Anchor::max_for_buffer(self.remote_id)
         } else {
-            if cfg!(debug_assertions) {
-                self.visible_text.assert_char_boundary(offset);
-            } else if offset > self.visible_text.len() {
-                panic!("offset {} is out of bounds", offset)
+            if self
+                .visible_text
+                .assert_char_boundary::<{ cfg!(debug_assertions) }>(offset)
+            {
+                offset = match bias {
+                    Bias::Left => self.visible_text.floor_char_boundary(offset),
+                    Bias::Right => self.visible_text.ceil_char_boundary(offset),
+                };
             }
             let (start, _, item) = self.fragments.find::<usize, _>(&None, &offset, bias);
-            let fragment = item.unwrap();
+            let Some(fragment) = item else {
+                // We got a bad offset, likely out of bounds
+                debug_panic!(
+                    "Failed to find fragment at offset {} (len: {})",
+                    offset,
+                    self.len()
+                );
+                return Anchor::max_for_buffer(self.remote_id);
+            };
             let overshoot = offset - start;
             Anchor {
                 timestamp: fragment.timestamp,
@@ -3136,10 +3151,14 @@ impl ToOffset for Point {
 
 impl ToOffset for usize {
     fn to_offset(&self, snapshot: &BufferSnapshot) -> usize {
-        if cfg!(debug_assertions) {
-            snapshot.as_rope().assert_char_boundary(*self);
+        if snapshot
+            .as_rope()
+            .assert_char_boundary::<{ cfg!(debug_assertions) }>(*self)
+        {
+            snapshot.as_rope().floor_char_boundary(*self)
+        } else {
+            *self
         }
-        *self
     }
 }
 

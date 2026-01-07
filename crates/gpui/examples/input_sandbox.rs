@@ -376,7 +376,7 @@ fn main() {
             |window, cx| {
                 let view = cx.new(InputSandbox::new);
                 let focus_handle = view.read(cx).active_input().focus_handle(cx);
-                window.focus(&focus_handle);
+                window.focus(&focus_handle, cx);
                 view
             },
         )

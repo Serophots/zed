@@ -354,7 +354,7 @@ struct UpdateObservationState {
     _maintain_remote_snapshot: Task<Option<()>>,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub enum Event {
     UpdatedEntries(UpdatedEntriesSet),
     UpdatedGitRepositories(UpdatedGitRepositoriesSet),
@@ -399,7 +399,7 @@ impl Worktree {
             None
         };
 
-        cx.new(move |cx: &mut Context<Worktree>| {
+        Ok(cx.new(move |cx: &mut Context<Worktree>| {
             let mut snapshot = LocalSnapshot {
                 ignores_by_parent_abs_path: Default::default(),
                 global_gitignore: Default::default(),
@@ -478,7 +478,7 @@ impl Worktree {
             };
             worktree.start_background_scanner(scan_requests_rx, path_prefixes_to_scan_rx, cx);
             Worktree::Local(worktree)
-        })
+        }))
     }
 
     pub fn remote(
@@ -931,7 +931,7 @@ impl Worktree {
                     cx,
                 ),
             ))
-        })??;
+        })?;
         Ok(proto::ProjectEntryResponse {
             entry: match &entry.await? {
                 CreatedEntry::Included(entry) => Some(entry.into()),
@@ -955,8 +955,9 @@ impl Worktree {
                     cx,
                 ),
             )
-        })?;
-        task.context("invalid entry")?.await?;
+        });
+        task.ok_or_else(|| anyhow::anyhow!("invalid entry"))?
+            .await?;
         Ok(proto::ProjectEntryResponse {
             entry: None,
             worktree_scan_id: scan_id as u64,
@@ -970,9 +971,10 @@ impl Worktree {
     ) -> Result<proto::ExpandProjectEntryResponse> {
         let task = this.update(&mut cx, |this, cx| {
             this.expand_entry(ProjectEntryId::from_proto(request.entry_id), cx)
-        })?;
-        task.context("no such entry")?.await?;
-        let scan_id = this.read_with(&cx, |this, _| this.scan_id())?;
+        });
+        task.ok_or_else(|| anyhow::anyhow!("no such entry"))?
+            .await?;
+        let scan_id = this.read_with(&cx, |this, _| this.scan_id());
         Ok(proto::ExpandProjectEntryResponse {
             worktree_scan_id: scan_id as u64,
         })
@@ -985,9 +987,10 @@ impl Worktree {
     ) -> Result<proto::ExpandAllForProjectEntryResponse> {
         let task = this.update(&mut cx, |this, cx| {
             this.expand_all_for_entry(ProjectEntryId::from_proto(request.entry_id), cx)
-        })?;
-        task.context("no such entry")?.await?;
-        let scan_id = this.read_with(&cx, |this, _| this.scan_id())?;
+        });
+        task.ok_or_else(|| anyhow::anyhow!("no such entry"))?
+            .await?;
+        let scan_id = this.read_with(&cx, |this, _| this.scan_id());
         Ok(proto::ExpandAllForProjectEntryResponse {
             worktree_scan_id: scan_id as u64,
         })
@@ -1137,8 +1140,7 @@ impl LocalWorktree {
                             this.update_abs_path_and_refresh(new_path, cx);
                         }
                     }
-                })
-                .ok();
+                });
             }
         });
         self._background_scanner_tasks = vec![background_scanner, scan_state_updater];
@@ -1359,9 +1361,7 @@ impl LocalWorktree {
                     anyhow::bail!("File is too large to load");
                 }
             }
-
-            let content = fs.load_bytes(&abs_path).await?;
-            let (text, encoding, has_bom) = decode_byte(content)?;
+            let (text, encoding, has_bom) = decode_file_text(fs.as_ref(), &abs_path).await?;
 
             let worktree = this.upgrade().context("worktree was dropped")?;
             let file = match entry.await? {
@@ -1707,7 +1707,7 @@ impl LocalWorktree {
                             .refresh_entries_for_paths(paths_to_refresh.clone()),
                     )
                 },
-            )??;
+            )?;
 
             cx.background_spawn(async move {
                 refresh.next().await;
@@ -1717,12 +1717,12 @@ impl LocalWorktree {
             .log_err();
 
             let this = this.upgrade().with_context(|| "Dropped worktree")?;
-            cx.read_entity(&this, |this, _| {
+            Ok(cx.read_entity(&this, |this, _| {
                 paths_to_refresh
                     .iter()
                     .filter_map(|path| Some(this.entry_for_path(path)?.id))
                     .collect()
-            })
+            }))
         })
     }
 
@@ -5872,14 +5872,76 @@ impl fs::Watcher for NullWatcher {
     }
 }
 
-fn decode_byte(bytes: Vec<u8>) -> anyhow::Result<(String, &'static Encoding, bool)> {
-    // check BOM
-    if let Some((encoding, _bom_len)) = Encoding::for_bom(&bytes) {
+const FILE_ANALYSIS_BYTES: usize = 1024;
+
+async fn decode_file_text(
+    fs: &dyn Fs,
+    abs_path: &Path,
+) -> Result<(String, &'static Encoding, bool)> {
+    let mut file = fs
+        .open_sync(&abs_path)
+        .await
+        .with_context(|| format!("opening file {abs_path:?}"))?;
+
+    // First, read the beginning of the file to determine its kind and encoding.
+    // We do not want to load an entire large blob into memory only to discard it.
+    let mut file_first_bytes = Vec::with_capacity(FILE_ANALYSIS_BYTES);
+    let mut buf = [0u8; FILE_ANALYSIS_BYTES];
+    let mut reached_eof = false;
+    loop {
+        if file_first_bytes.len() >= FILE_ANALYSIS_BYTES {
+            break;
+        }
+        let n = file
+            .read(&mut buf)
+            .with_context(|| format!("reading bytes of the file {abs_path:?}"))?;
+        if n == 0 {
+            reached_eof = true;
+            break;
+        }
+        file_first_bytes.extend_from_slice(&buf[..n]);
+    }
+    let (bom_encoding, byte_content) = decode_byte_header(&file_first_bytes);
+    anyhow::ensure!(
+        byte_content != ByteContent::Binary,
+        "Binary files are not supported"
+    );
+
+    // If the file is eligible for opening, read the rest of the file.
+    let mut content = file_first_bytes;
+    if !reached_eof {
+        let mut buf = [0u8; 8 * 1024];
+        loop {
+            let n = file
+                .read(&mut buf)
+                .with_context(|| format!("reading remaining bytes of the file {abs_path:?}"))?;
+            if n == 0 {
+                break;
+            }
+            content.extend_from_slice(&buf[..n]);
+        }
+    }
+    decode_byte_full(content, bom_encoding, byte_content)
+}
+
+fn decode_byte_header(prefix: &[u8]) -> (Option<&'static Encoding>, ByteContent) {
+    if let Some((encoding, _bom_len)) = Encoding::for_bom(prefix) {
+        return (Some(encoding), ByteContent::Unknown);
+    }
+    (None, analyze_byte_content(prefix))
+}
+
+fn decode_byte_full(
+    bytes: Vec<u8>,
+    bom_encoding: Option<&'static Encoding>,
+    byte_content: ByteContent,
+) -> Result<(String, &'static Encoding, bool)> {
+    if let Some(encoding) = bom_encoding {
         let (cow, _) = encoding.decode_with_bom_removal(&bytes);
         return Ok((cow.into_owned(), encoding, true));
     }
 
-    match analyze_byte_content(&bytes) {
+    match byte_content {
         ByteContent::Utf16Le => {
             let encoding = encoding_rs::UTF_16LE;
             let (cow, _, _) = encoding.decode(&bytes);
@@ -5933,47 +5995,79 @@ enum ByteContent {
     Binary,
     Unknown,
 }
-// Heuristic check using null byte distribution.
-// NOTE: This relies on the presence of ASCII characters (which become `0x00` in UTF-16).
-// Files consisting purely of non-ASCII characters (like Japanese) may not be detected here
-// and will result in `Unknown`.
+
+// Heuristic check using null byte distribution plus a generic text-likeness
+// heuristic. This prefers UTF-16 when many bytes are NUL and otherwise
+// distinguishes between text-like and binary-like content.
 fn analyze_byte_content(bytes: &[u8]) -> ByteContent {
     if bytes.len() < 2 {
         return ByteContent::Unknown;
     }
 
-    let check_len = bytes.len().min(1024);
-    let sample = &bytes[..check_len];
-
-    if !sample.contains(&0) {
-        return ByteContent::Unknown;
+    if is_known_binary_header(bytes) {
+        return ByteContent::Binary;
     }
 
-    let mut even_nulls = 0;
-    let mut odd_nulls = 0;
+    let limit = bytes.len().min(FILE_ANALYSIS_BYTES);
+    let mut even_null_count = 0usize;
+    let mut odd_null_count = 0usize;
+    let mut non_text_like_count = 0usize;
 
-    for (i, &byte) in sample.iter().enumerate() {
+    for (i, &byte) in bytes[..limit].iter().enumerate() {
         if byte == 0 {
             if i % 2 == 0 {
-                even_nulls += 1;
+                even_null_count += 1;
             } else {
-                odd_nulls += 1;
+                odd_null_count += 1;
             }
+            non_text_like_count += 1;
+            continue;
+        }
+
+        let is_text_like = match byte {
+            b'\t' | b'\n' | b'\r' | 0x0C => true,
+            0x20..=0x7E => true,
+            // Treat bytes that are likely part of UTF-8 or single-byte encodings as text-like.
+            0x80..=0xBF | 0xC2..=0xF4 => true,
+            _ => false,
+        };
+
+        if !is_text_like {
+            non_text_like_count += 1;
         }
     }
 
-    let total_nulls = even_nulls + odd_nulls;
-    if total_nulls < check_len / 10 {
+    let total_null_count = even_null_count + odd_null_count;
+
+    // If there are no NUL bytes at all, this is overwhelmingly likely to be text.
+    if total_null_count == 0 {
         return ByteContent::Unknown;
     }
 
-    if even_nulls > odd_nulls * 4 {
-        return ByteContent::Utf16Be;
+    if total_null_count >= limit / 16 {
+        if even_null_count > odd_null_count * 4 {
+            return ByteContent::Utf16Be;
+        }
+        if odd_null_count > even_null_count * 4 {
+            return ByteContent::Utf16Le;
+        }
+        return ByteContent::Binary;
     }
 
-    if odd_nulls > even_nulls * 4 {
-        return ByteContent::Utf16Le;
+    if non_text_like_count * 100 < limit * 8 {
+        ByteContent::Unknown
+    } else {
+        ByteContent::Binary
     }
+}
 
-    ByteContent::Binary
+fn is_known_binary_header(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"%PDF-") // PDF
+        || bytes.starts_with(b"PK\x03\x04") // ZIP local header
+        || bytes.starts_with(b"PK\x05\x06") // ZIP end of central directory
+        || bytes.starts_with(b"PK\x07\x08") // ZIP spanning/splitting
+        || bytes.starts_with(b"\x89PNG\r\n\x1a\n") // PNG
+        || bytes.starts_with(b"\xFF\xD8\xFF") // JPEG
+        || bytes.starts_with(b"GIF87a") // GIF87a
+        || bytes.starts_with(b"GIF89a") // GIF89a
 }

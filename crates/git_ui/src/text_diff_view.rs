@@ -258,6 +258,7 @@ async fn update_diff_buffer(
 ) -> Result<()> {
     let source_buffer_snapshot = source_buffer.read_with(cx, |buffer, _| buffer.snapshot());
     let language = source_buffer_snapshot.language().cloned();
+    let language_registry = source_buffer.read_with(cx, |buffer, _| buffer.language_registry());
 
     let base_buffer_snapshot = clipboard_buffer.read_with(cx, |buffer, _| buffer.snapshot());
     let base_text = base_buffer_snapshot.text();
@@ -267,14 +268,15 @@ async fn update_diff_buffer(
             diff.update_diff(
                 source_buffer_snapshot.text.clone(),
                 Some(Arc::from(base_text.as_str())),
-                true,
-                language,
+                Some(true),
+                language.clone(),
                 cx,
             )
         })
         .await;
 
     diff.update(cx, |diff, cx| {
+        diff.language_changed(language, language_registry, cx);
         diff.set_snapshot(update, &source_buffer_snapshot.text, cx)
     })
     .await;
@@ -367,7 +369,7 @@ impl Item for TextDiffView {
 
     fn navigate(
         &mut self,
-        data: Box<dyn Any>,
+        data: Arc<dyn Any + Send>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {

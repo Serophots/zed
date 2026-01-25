@@ -62,7 +62,6 @@ struct HistoryEntry {
 pub struct InputState {
     focus_handle: FocusHandle,
     content: String,
-    placeholder: SharedString,
     selected_range: Range<usize>,
     selection_reversed: bool,
     marked_range: Option<Range<usize>>,
@@ -131,7 +130,6 @@ impl InputState {
         Self {
             focus_handle: cx.focus_handle(),
             content: String::new(),
-            placeholder: SharedString::default(),
             selected_range: 0..0,
             selection_reversed: false,
             marked_range: None,
@@ -352,21 +350,6 @@ impl InputState {
             cx.emit(InputStateEvent::Redo);
             cx.notify();
         }
-    }
-
-    /// Returns the placeholder text shown when content is empty.
-    pub fn placeholder(&self) -> &SharedString {
-        &self.placeholder
-    }
-
-    /// Sets the placeholder text.
-    pub fn set_placeholder(
-        &mut self,
-        placeholder: impl Into<SharedString>,
-        cx: &mut Context<Self>,
-    ) {
-        self.placeholder = placeholder.into();
-        cx.notify();
     }
 
     /// Returns the current selection range.

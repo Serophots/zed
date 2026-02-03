@@ -13,7 +13,7 @@ use crate::{
     Hsla, InputLineLayout, InputState, InspectorElementId, InteractiveElement, Interactivity,
     IntoElement, LayoutId, Length, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
     Pixels, Point, ScrollWheelEvent, SharedString, StyleRefinement, Styled, TextAlign,
-    TextDirection, TextRun, TextStyle, Window, WrappedLine, colors, fill,
+    TextDirection, TextRun, TextStyle, Window, colors, fill,
     input::{INPUT_CONTEXT, bindings::Escape},
     point, px, relative, size,
 };
@@ -567,20 +567,20 @@ fn paint_multiline(
     let selected_range = input_state.selected_range().clone();
     let marked_range = input_state.marked_range().cloned();
     let cursor_offset = input_state.cursor_offset();
-    let line_layouts = input_state.line_layouts.clone();
     let scroll_offset = input_state.scroll_offset;
     let line_height = input_state.line_height;
     let is_focused = focus_handle.is_focused(window);
 
     if !selected_range.is_empty() {
         paint_multiline_selection(
-            &line_layouts,
+            input,
             &selected_range,
             bounds,
             scroll_offset,
             line_height,
             colors.selection,
             window,
+            cx,
         );
     }
 
@@ -591,33 +591,27 @@ fn paint_multiline(
             }
         }
     } else {
-        paint_multiline_text(
-            &line_layouts,
-            bounds,
-            scroll_offset,
-            line_height,
-            window,
-            cx,
-        );
+        paint_multiline_text(input, bounds, scroll_offset, line_height, window, cx);
     }
 
     if let Some(marked_range) = &marked_range {
         if !marked_range.is_empty() {
             paint_multiline_marked_underline(
-                &line_layouts,
+                input,
                 marked_range,
                 bounds,
                 scroll_offset,
                 line_height,
                 colors.cursor,
                 window,
+                cx,
             );
         }
     }
 
     if is_focused && selected_range.is_empty() && cursor_visible {
         paint_multiline_cursor(
-            &line_layouts,
+            input,
             cursor_offset,
             &content,
             bounds,
@@ -625,6 +619,7 @@ fn paint_multiline(
             line_height,
             colors.cursor,
             window,
+            cx,
         );
     }
 }
@@ -669,14 +664,17 @@ fn compute_visual_line_index(y: Pixels, line_height: Pixels) -> usize {
 }
 
 fn paint_multiline_selection(
-    line_layouts: &[InputLineLayout],
+    input: &Entity<InputState>,
     selected_range: &std::ops::Range<usize>,
     bounds: Bounds<Pixels>,
     scroll_offset: Pixels,
     line_height: Pixels,
     selection_color: Hsla,
     window: &mut Window,
+    cx: &mut App,
 ) {
+    let line_layouts = &input.read(cx).line_layouts[..];
+
     for line in line_layouts {
         let line_y = line.y_offset - scroll_offset;
 
@@ -826,13 +824,15 @@ fn paint_multiline_placeholder(
 }
 
 fn paint_multiline_text(
-    line_layouts: &[InputLineLayout],
+    input: &Entity<InputState>,
     bounds: Bounds<Pixels>,
     scroll_offset: Pixels,
     line_height: Pixels,
     window: &mut Window,
     cx: &mut App,
 ) {
+    let line_layouts = &input.read(cx).line_layouts[..];
+
     for line_layout in line_layouts {
         let line_y = line_layout.y_offset - scroll_offset;
 
@@ -857,14 +857,17 @@ fn paint_multiline_text(
 }
 
 fn paint_multiline_marked_underline(
-    line_layouts: &[InputLineLayout],
+    input: &Entity<InputState>,
     marked_range: &std::ops::Range<usize>,
     bounds: Bounds<Pixels>,
     scroll_offset: Pixels,
     line_height: Pixels,
     underline_color: Hsla,
     window: &mut Window,
+    cx: &mut App,
 ) {
+    let line_layouts = &input.read(cx).line_layouts[..];
+
     let underline_thickness = px(MARKED_TEXT_UNDERLINE_THICKNESS);
     let underline_offset = line_height - underline_thickness;
 
@@ -977,7 +980,7 @@ fn paint_multiline_marked_underline(
 }
 
 fn paint_multiline_cursor(
-    line_layouts: &[InputLineLayout],
+    input: &Entity<InputState>,
     cursor_offset: usize,
     _content: &str,
     bounds: Bounds<Pixels>,
@@ -985,7 +988,10 @@ fn paint_multiline_cursor(
     line_height: Pixels,
     cursor_color: Hsla,
     window: &mut Window,
+    cx: &mut App,
 ) {
+    let line_layouts = &input.read(cx).line_layouts[..];
+
     for line in line_layouts.iter() {
         let line_y = line.y_offset - scroll_offset;
 
@@ -1049,7 +1055,6 @@ struct SingleLinePaintState {
     text_width: Pixels,
     is_focused: bool,
     char_positions: Vec<Pixels>,
-    wrapped_line: Option<WrappedLine>,
     direction: TextDirection,
 }
 
@@ -1082,11 +1087,6 @@ impl SingleLinePaintState {
             }
         }
 
-        let wrapped_line = input_state
-            .line_layouts
-            .first()
-            .and_then(|l| l.wrapped_line.clone());
-
         let direction = input_state
             .line_layouts
             .first()
@@ -1103,7 +1103,6 @@ impl SingleLinePaintState {
             text_width,
             is_focused: focus_handle.is_focused(window),
             char_positions,
-            wrapped_line,
             direction,
         }
     }
@@ -1150,7 +1149,7 @@ fn paint_singleline(
             }
         }
     } else {
-        paint_singleline_text(&state, bounds, window, cx);
+        paint_singleline_text(input, &state, bounds, window, cx);
     }
 
     if let Some(marked_range) = &state.marked_range {
@@ -1220,12 +1219,18 @@ fn paint_singleline_placeholder(
 }
 
 fn paint_singleline_text(
+    input: &Entity<InputState>,
     state: &SingleLinePaintState,
     bounds: Bounds<Pixels>,
     window: &mut Window,
     cx: &mut App,
 ) {
-    let Some(wrapped_line) = &state.wrapped_line else {
+    let Some(wrapped_line) = input
+        .read(cx)
+        .line_layouts
+        .first()
+        .and_then(|l| l.wrapped_line.as_ref())
+    else {
         return;
     };
 

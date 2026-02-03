@@ -136,7 +136,7 @@ impl WrappedLine {
         align: TextAlign,
         bounds: Option<Bounds<Pixels>>,
         window: &mut Window,
-        cx: &mut App,
+        cx: &App,
     ) -> Result<()> {
         let align_width = match bounds {
             Some(bounds) => Some(bounds.size.width),
@@ -198,7 +198,7 @@ fn paint_line(
     decoration_runs: &[DecorationRun],
     wrap_boundaries: &[WrapBoundary],
     window: &mut Window,
-    cx: &mut App,
+    cx: &App,
 ) -> Result<()> {
     let line_bounds = Bounds::new(
         origin,

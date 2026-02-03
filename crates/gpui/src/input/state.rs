@@ -96,7 +96,7 @@ pub struct InputState {
 ///
 /// A logical line corresponds to content between newlines in the input text.
 /// When text wrapping is enabled, a logical line may span multiple visual lines.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct InputLineLayout {
     /// The byte range in the content string that this line covers.
     pub text_range: Range<usize>,

@@ -152,7 +152,7 @@ core-foundation.workspace = true
 core-foundation-sys.workspace = true
 core-graphics = "0.24"
 core-video.workspace = true
-core-text = "21"
+core-text = "=21.0" # Updating to 21.1.0 pulls in core-graphics@0.25 which causes conflict. As of writing, zed still uses 21.0.0 despite having contributed to the 21.1.0 release
 # WARNING: If you change this, you must also publish a new version of zed-font-kit to crates.io
 font-kit = { git = "https://github.com/zed-industries/font-kit", rev = "110523127440aefb11ce0cf280ae7c5071337ec5", package = "zed-font-kit", version = "0.14.1-zed", optional = true }
 foreign-types = "0.5"

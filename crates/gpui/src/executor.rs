@@ -14,7 +14,7 @@ use std::{
 };
 use util::TryFutureExt;
 
-pub use scheduler::{FallibleTask, Priority};
+pub use scheduler::{FallibleTask, ForegroundExecutor as SchedulerForegroundExecutor, Priority};
 
 /// A pointer to the executor that is currently running,
 /// for spawning background tasks.
@@ -269,6 +269,7 @@ impl BackgroundExecutor {
     /// Returns a task that will complete after the given duration.
     /// Depending on other concurrent tasks the elapsed duration may be longer
     /// than requested.
+    #[track_caller]
     pub fn timer(&self, duration: Duration) -> Task<()> {
         if duration.is_zero() {
             return Task::ready(());
@@ -476,6 +477,11 @@ impl ForegroundExecutor {
     #[doc(hidden)]
     pub fn dispatcher(&self) -> &Arc<dyn PlatformDispatcher> {
         &self.dispatcher
+    }
+
+    #[doc(hidden)]
+    pub fn scheduler_executor(&self) -> SchedulerForegroundExecutor {
+        self.inner.clone()
     }
 }
 

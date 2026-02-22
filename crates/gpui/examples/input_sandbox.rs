@@ -4,10 +4,11 @@
 
 use gpui::input::bind_input_keys;
 use gpui::{
-    App, Application, Bounds, Context, Div, Entity, FocusHandle, Focusable, InputState,
-    InputStateEvent, KeyBinding, Stateful, Subscription, Window, WindowBounds, WindowOptions, div,
-    input, prelude::*, px, rgb, size, text_area,
+    App, Bounds, Context, Div, Entity, FocusHandle, Focusable, InputState, InputStateEvent,
+    KeyBinding, Stateful, Subscription, Window, WindowBounds, WindowOptions, div, input,
+    prelude::*, px, rgb, size, text_area,
 };
+use gpui_platform::application;
 
 struct InputSandbox {
     multiline_input: Entity<InputState>,
@@ -362,7 +363,7 @@ fn key_row(key: &str, desc: &str) -> gpui::Div {
 gpui::actions!(input_sandbox, [ToggleMode]);
 
 fn main() {
-    Application::new().run(|cx: &mut App| {
+    application().run(|cx: &mut App| {
         bind_input_keys(cx, None);
 
         cx.bind_keys([KeyBinding::new("ctrl-t", ToggleMode, None)]);

@@ -2,12 +2,11 @@ use std::ops::Range;
 use std::time::{Duration, Instant};
 
 use crate::{
-    App, AppContext, Bounds, ClipboardItem, Context, Entity, EntityInputHandler, EventEmitter,
-    FocusHandle, Focusable, Pixels, Point, SharedString, Subscription, TextRun, UTF16Selection,
-    Window, WrappedLine, point, px,
+    App, AppContext, BlinkManager, Bounds, ClipboardItem, Context, Entity, EntityInputHandler,
+    EventEmitter, FocusHandle, Focusable, Pixels, Point, SharedString, Subscription, TextRun,
+    UTF16Selection, Window, WrappedLine, point, px,
 };
 
-use super::BlinkManager;
 use unicode_segmentation::UnicodeSegmentation;
 
 use super::bidi::{TextDirection, detect_base_direction};
@@ -124,7 +123,7 @@ impl InputState {
     /// Creates a new `Input` with the specified multiline setting.
     /// Cursor blinking is enabled by default.
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let blink_manager = cx.new(|cx| BlinkManager::new(DEFAULT_BLINK_INTERVAL, cx));
+        let blink_manager = cx.new(|_| BlinkManager::new(DEFAULT_BLINK_INTERVAL));
         let blink_subscription = cx.observe(&blink_manager, |_, _, cx| cx.notify());
 
         Self {
@@ -182,7 +181,7 @@ impl InputState {
     /// This also ensures cursor blinking is enabled.
     /// Blinking is automatically paused during text editing for immediate feedback.
     pub fn cursor_blink_interval(mut self, interval: Duration, cx: &mut Context<Self>) -> Self {
-        let blink_manager = cx.new(|cx| BlinkManager::new(interval, cx));
+        let blink_manager = cx.new(|_| BlinkManager::new(interval));
         self._subscriptions
             .push(cx.observe(&blink_manager, |_, _, cx| cx.notify()));
         self.blink_manager = Some(blink_manager);

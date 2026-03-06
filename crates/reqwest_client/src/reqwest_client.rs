@@ -1,18 +1,16 @@
-use std::error::Error;
+use std::error::Error as _;
 use std::sync::{LazyLock, OnceLock};
-use std::{borrow::Cow, mem, pin::Pin, task::Poll, time::Duration};
+use std::time::Duration;
+use std::{borrow::Cow, mem, pin::Pin, task::Poll};
 
 use gpui_util::defer;
 
 use anyhow::anyhow;
 use bytes::{BufMut, Bytes, BytesMut};
 use futures::{AsyncRead, FutureExt as _, TryStreamExt as _};
-use http_client::{RedirectPolicy, Url, http};
+use http_client::{Url, http};
 use regex::Regex;
-use reqwest::{
-    header::{HeaderMap, HeaderValue},
-    redirect,
-};
+use reqwest::header::{HeaderMap, HeaderValue};
 
 const DEFAULT_CAPACITY: usize = 4096;
 static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
@@ -28,7 +26,7 @@ pub struct ReqwestClient {
 impl ReqwestClient {
     fn builder() -> reqwest::ClientBuilder {
         reqwest::Client::builder()
-            .use_rustls_tls()
+            .tls_backend_rustls()
             .connect_timeout(Duration::from_secs(10))
     }
 
@@ -234,13 +232,13 @@ impl http_client::HttpClient for ReqwestClient {
 
         let mut request = self.client.request(parts.method, parts.uri.to_string());
         request = request.headers(parts.headers);
-        if let Some(redirect_policy) = parts.extensions.get::<RedirectPolicy>() {
-            request = request.redirect_policy(match redirect_policy {
-                RedirectPolicy::NoFollow => redirect::Policy::none(),
-                RedirectPolicy::FollowLimit(limit) => redirect::Policy::limited(*limit as usize),
-                RedirectPolicy::FollowAll => redirect::Policy::limited(100),
-            });
-        }
+        // if let Some(redirect_policy) = parts.extensions.get::<RedirectPolicy>() {
+        //     request = request.redirect_policy(match redirect_policy {
+        //         RedirectPolicy::NoFollow => redirect::Policy::none(),
+        //         RedirectPolicy::FollowLimit(limit) => redirect::Policy::limited(*limit as usize),
+        //         RedirectPolicy::FollowAll => redirect::Policy::limited(100),
+        //     });
+        // }
         let request = request.body(match body.0 {
             http_client::Inner::Empty => reqwest::Body::default(),
             http_client::Inner::Bytes(cursor) => cursor.into_inner().into(),

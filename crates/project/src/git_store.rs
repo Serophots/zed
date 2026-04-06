@@ -34,7 +34,7 @@ use git::{
     repository::{
         Branch, CommitDetails, CommitDiff, CommitFile, CommitOptions, DiffType, FetchOptions,
         GitRepository, GitRepositoryCheckpoint, GraphCommitData, InitialGraphCommitData, LogOrder,
-        LogSource, PushOptions, Remote, RemoteCommandOutput, RepoPath, ResetMode,
+        LogSource, PushOptions, Remote, RemoteCommandOutput, RepoPath, ResetMode, SearchCommitArgs,
         UpstreamTrackingStatus, Worktree as GitWorktree,
     },
     stash::{GitStash, StashEntry},
@@ -560,6 +560,10 @@ impl GitStore {
         client.add_entity_request_handler(Self::handle_run_hook);
         client.add_entity_request_handler(Self::handle_reset);
         client.add_entity_request_handler(Self::handle_show);
+        client.add_entity_request_handler(Self::handle_create_checkpoint);
+        client.add_entity_request_handler(Self::handle_restore_checkpoint);
+        client.add_entity_request_handler(Self::handle_compare_checkpoints);
+        client.add_entity_request_handler(Self::handle_diff_checkpoints);
         client.add_entity_request_handler(Self::handle_load_commit_diff);
         client.add_entity_request_handler(Self::handle_file_history);
         client.add_entity_request_handler(Self::handle_checkout_files);
@@ -1532,13 +1536,17 @@ impl GitStore {
             } else if let UpdatedGitRepository {
                 new_work_directory_abs_path: Some(work_directory_abs_path),
                 dot_git_abs_path: Some(dot_git_abs_path),
-                repository_dir_abs_path: Some(_repository_dir_abs_path),
+                repository_dir_abs_path: Some(repository_dir_abs_path),
                 common_dir_abs_path: Some(common_dir_abs_path),
                 ..
             } = update
             {
-                let original_repo_abs_path: Arc<Path> =
-                    git::repository::original_repo_path_from_common_dir(common_dir_abs_path).into();
+                let original_repo_abs_path: Arc<Path> = git::repository::original_repo_path(
+                    work_directory_abs_path,
+                    common_dir_abs_path,
+                    repository_dir_abs_path,
+                )
+                .into();
                 let id = RepositoryId(next_repository_id.fetch_add(1, atomic::Ordering::Release));
                 let is_trusted = TrustedWorktrees::try_get_global(cx)
                     .map(|trusted_worktrees| {
@@ -1793,6 +1801,26 @@ impl GitStore {
 
     pub fn repositories(&self) -> &HashMap<RepositoryId, Entity<Repository>> {
         &self.repositories
+    }
+
+    /// Returns the original (main) repository working directory for the given worktree.
+    /// For normal checkouts this equals the worktree's own path; for linked
+    /// worktrees it points back to the original repo.
+    pub fn original_repo_path_for_worktree(
+        &self,
+        worktree_id: WorktreeId,
+        cx: &App,
+    ) -> Option<Arc<Path>> {
+        self.active_repo_id
+            .iter()
+            .chain(self.worktree_ids.keys())
+            .find(|repo_id| {
+                self.worktree_ids
+                    .get(repo_id)
+                    .is_some_and(|ids| ids.contains(&worktree_id))
+            })
+            .and_then(|repo_id| self.repositories.get(repo_id))
+            .map(|repo| repo.read(cx).snapshot().original_repo_abs_path)
     }
 
     pub fn status_for_buffer_id(&self, buffer_id: BufferId, cx: &App) -> Option<FileStatus> {
@@ -2593,6 +2621,92 @@ impl GitStore {
             author_email: commit.author_email.into(),
             author_name: commit.author_name.into(),
         })
+    }
+
+    async fn handle_create_checkpoint(
+        this: Entity<Self>,
+        envelope: TypedEnvelope<proto::GitCreateCheckpoint>,
+        mut cx: AsyncApp,
+    ) -> Result<proto::GitCreateCheckpointResponse> {
+        let repository_id = RepositoryId::from_proto(envelope.payload.repository_id);
+        let repository_handle = Self::repository_for_request(&this, repository_id, &mut cx)?;
+
+        let checkpoint = repository_handle
+            .update(&mut cx, |repository, _| repository.checkpoint())
+            .await??;
+
+        Ok(proto::GitCreateCheckpointResponse {
+            commit_sha: checkpoint.commit_sha.as_bytes().to_vec(),
+        })
+    }
+
+    async fn handle_restore_checkpoint(
+        this: Entity<Self>,
+        envelope: TypedEnvelope<proto::GitRestoreCheckpoint>,
+        mut cx: AsyncApp,
+    ) -> Result<proto::Ack> {
+        let repository_id = RepositoryId::from_proto(envelope.payload.repository_id);
+        let repository_handle = Self::repository_for_request(&this, repository_id, &mut cx)?;
+
+        let checkpoint = GitRepositoryCheckpoint {
+            commit_sha: Oid::from_bytes(&envelope.payload.commit_sha)?,
+        };
+
+        repository_handle
+            .update(&mut cx, |repository, _| {
+                repository.restore_checkpoint(checkpoint)
+            })
+            .await??;
+
+        Ok(proto::Ack {})
+    }
+
+    async fn handle_compare_checkpoints(
+        this: Entity<Self>,
+        envelope: TypedEnvelope<proto::GitCompareCheckpoints>,
+        mut cx: AsyncApp,
+    ) -> Result<proto::GitCompareCheckpointsResponse> {
+        let repository_id = RepositoryId::from_proto(envelope.payload.repository_id);
+        let repository_handle = Self::repository_for_request(&this, repository_id, &mut cx)?;
+
+        let left = GitRepositoryCheckpoint {
+            commit_sha: Oid::from_bytes(&envelope.payload.left_commit_sha)?,
+        };
+        let right = GitRepositoryCheckpoint {
+            commit_sha: Oid::from_bytes(&envelope.payload.right_commit_sha)?,
+        };
+
+        let equal = repository_handle
+            .update(&mut cx, |repository, _| {
+                repository.compare_checkpoints(left, right)
+            })
+            .await??;
+
+        Ok(proto::GitCompareCheckpointsResponse { equal })
+    }
+
+    async fn handle_diff_checkpoints(
+        this: Entity<Self>,
+        envelope: TypedEnvelope<proto::GitDiffCheckpoints>,
+        mut cx: AsyncApp,
+    ) -> Result<proto::GitDiffCheckpointsResponse> {
+        let repository_id = RepositoryId::from_proto(envelope.payload.repository_id);
+        let repository_handle = Self::repository_for_request(&this, repository_id, &mut cx)?;
+
+        let base = GitRepositoryCheckpoint {
+            commit_sha: Oid::from_bytes(&envelope.payload.base_commit_sha)?,
+        };
+        let target = GitRepositoryCheckpoint {
+            commit_sha: Oid::from_bytes(&envelope.payload.target_commit_sha)?,
+        };
+
+        let diff = repository_handle
+            .update(&mut cx, |repository, _| {
+                repository.diff_checkpoints(base, target)
+            })
+            .await??;
+
+        Ok(proto::GitDiffCheckpointsResponse { diff })
     }
 
     async fn handle_load_commit_diff(
@@ -3706,6 +3820,25 @@ impl RepositorySnapshot {
         }
     }
 
+    /// The main worktree is the original checkout that other worktrees were
+    /// created from.
+    ///
+    /// For example, if you had both `~/code/zed` and `~/code/worktrees/zed-2`,
+    /// then `~/code/zed` is the main worktree and `~/code/worktrees/zed-2` is a linked worktree.
+    ///
+    /// Submodules also return `true` here, since they are not linked worktrees.
+    pub fn is_main_worktree(&self) -> bool {
+        self.work_directory_abs_path == self.original_repo_abs_path
+    }
+
+    /// Returns true if this repository is a linked worktree, that is, one that
+    /// was created from another worktree.
+    ///
+    /// Returns `false` for both the main worktree and submodules.
+    pub fn is_linked_worktree(&self) -> bool {
+        !self.is_main_worktree()
+    }
+
     pub fn linked_worktrees(&self) -> &[GitWorktree] {
         &self.linked_worktrees
     }
@@ -4553,6 +4686,32 @@ impl Repository {
         self.initial_graph_data.get(&(log_source, log_order))
     }
 
+    pub fn search_commits(
+        &mut self,
+        log_source: LogSource,
+        search_args: SearchCommitArgs,
+        request_tx: smol::channel::Sender<Oid>,
+        cx: &mut Context<Self>,
+    ) {
+        let repository_state = self.repository_state.clone();
+
+        cx.background_spawn(async move {
+            let repo_state = repository_state.await;
+
+            match repo_state {
+                Ok(RepositoryState::Local(LocalRepositoryState { backend, .. })) => {
+                    backend
+                        .search_commits(log_source, search_args, request_tx)
+                        .await
+                        .log_err();
+                }
+                Ok(RepositoryState::Remote(_)) => {}
+                Err(_) => {}
+            };
+        })
+        .detach();
+    }
+
     pub fn graph_data(
         &mut self,
         log_source: LogSource,
@@ -4656,12 +4815,11 @@ impl Repository {
                                 .commit_oid_to_index
                                 .insert(commit_data.sha, graph_data.commit_data.len());
                             graph_data.commit_data.push(commit_data);
-
-                            cx.emit(RepositoryEvent::GraphEvent(
-                                graph_data_key.clone(),
-                                GitGraphEvent::CountUpdated(graph_data.commit_data.len()),
-                            ));
                         }
+                        cx.emit(RepositoryEvent::GraphEvent(
+                            graph_data_key.clone(),
+                            GitGraphEvent::CountUpdated(graph_data.commit_data.len()),
+                        ));
                     });
 
                 match &graph_data {
@@ -6161,12 +6319,24 @@ impl Repository {
     }
 
     pub fn checkpoint(&mut self) -> oneshot::Receiver<Result<GitRepositoryCheckpoint>> {
-        self.send_job(None, |repo, _cx| async move {
+        let id = self.id;
+        self.send_job(None, move |repo, _cx| async move {
             match repo {
                 RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
                     backend.checkpoint().await
                 }
-                RepositoryState::Remote(..) => anyhow::bail!("not implemented yet"),
+                RepositoryState::Remote(RemoteRepositoryState { project_id, client }) => {
+                    let response = client
+                        .request(proto::GitCreateCheckpoint {
+                            project_id: project_id.0,
+                            repository_id: id.to_proto(),
+                        })
+                        .await?;
+
+                    Ok(GitRepositoryCheckpoint {
+                        commit_sha: Oid::from_bytes(&response.commit_sha)?,
+                    })
+                }
             }
         })
     }
@@ -6175,12 +6345,22 @@ impl Repository {
         &mut self,
         checkpoint: GitRepositoryCheckpoint,
     ) -> oneshot::Receiver<Result<()>> {
+        let id = self.id;
         self.send_job(None, move |repo, _cx| async move {
             match repo {
                 RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
                     backend.restore_checkpoint(checkpoint).await
                 }
-                RepositoryState::Remote { .. } => anyhow::bail!("not implemented yet"),
+                RepositoryState::Remote(RemoteRepositoryState { project_id, client }) => {
+                    client
+                        .request(proto::GitRestoreCheckpoint {
+                            project_id: project_id.0,
+                            repository_id: id.to_proto(),
+                            commit_sha: checkpoint.commit_sha.as_bytes().to_vec(),
+                        })
+                        .await?;
+                    Ok(())
+                }
             }
         })
     }
@@ -6274,12 +6454,23 @@ impl Repository {
         left: GitRepositoryCheckpoint,
         right: GitRepositoryCheckpoint,
     ) -> oneshot::Receiver<Result<bool>> {
+        let id = self.id;
         self.send_job(None, move |repo, _cx| async move {
             match repo {
                 RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
                     backend.compare_checkpoints(left, right).await
                 }
-                RepositoryState::Remote { .. } => anyhow::bail!("not implemented yet"),
+                RepositoryState::Remote(RemoteRepositoryState { project_id, client }) => {
+                    let response = client
+                        .request(proto::GitCompareCheckpoints {
+                            project_id: project_id.0,
+                            repository_id: id.to_proto(),
+                            left_commit_sha: left.commit_sha.as_bytes().to_vec(),
+                            right_commit_sha: right.commit_sha.as_bytes().to_vec(),
+                        })
+                        .await?;
+                    Ok(response.equal)
+                }
             }
         })
     }
@@ -6289,6 +6480,7 @@ impl Repository {
         base_checkpoint: GitRepositoryCheckpoint,
         target_checkpoint: GitRepositoryCheckpoint,
     ) -> oneshot::Receiver<Result<String>> {
+        let id = self.id;
         self.send_job(None, move |repo, _cx| async move {
             match repo {
                 RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
@@ -6296,7 +6488,17 @@ impl Repository {
                         .diff_checkpoints(base_checkpoint, target_checkpoint)
                         .await
                 }
-                RepositoryState::Remote { .. } => anyhow::bail!("not implemented yet"),
+                RepositoryState::Remote(RemoteRepositoryState { project_id, client }) => {
+                    let response = client
+                        .request(proto::GitDiffCheckpoints {
+                            project_id: project_id.0,
+                            repository_id: id.to_proto(),
+                            base_commit_sha: base_checkpoint.commit_sha.as_bytes().to_vec(),
+                            target_commit_sha: target_checkpoint.commit_sha.as_bytes().to_vec(),
+                        })
+                        .await?;
+                    Ok(response.diff)
+                }
             }
         })
     }
@@ -6345,22 +6547,9 @@ impl Repository {
                 let RepositoryState::Local(LocalRepositoryState { backend, .. }) = state else {
                     bail!("not a local repository")
                 };
-                let compute_snapshot = this.update(&mut cx, |this, _| {
-                    this.paths_needing_status_update.clear();
-                    compute_snapshot(
-                        this.id,
-                        this.work_directory_abs_path.clone(),
-                        this.snapshot.clone(),
-                        backend.clone(),
-                    )
-                });
-                let (snapshot, events) = cx.background_spawn(compute_snapshot).await?;
+                let snapshot = compute_snapshot(this.clone(), backend.clone(), &mut cx).await?;
                 this.update(&mut cx, |this, cx| {
-                    this.snapshot = snapshot.clone();
                     this.clear_pending_ops(cx);
-                    for event in events {
-                        cx.emit(event);
-                    }
                 });
                 if let Some(updates_tx) = updates_tx {
                     updates_tx
@@ -6392,7 +6581,7 @@ impl Repository {
             let state = RepositoryState::Local(state);
             let mut jobs = VecDeque::new();
             loop {
-                while let Ok(Some(next_job)) = job_rx.try_next() {
+                while let Ok(next_job) = job_rx.try_recv() {
                     jobs.push_back(next_job);
                 }
 
@@ -6428,7 +6617,7 @@ impl Repository {
             let state = RepositoryState::Remote(state);
             let mut jobs = VecDeque::new();
             loop {
-                while let Ok(Some(next_job)) = job_rx.try_next() {
+                while let Ok(next_job) = job_rx.try_recv() {
                     jobs.push_back(next_job);
                 }
 
@@ -7018,16 +7207,22 @@ fn branch_to_proto(branch: &git::repository::Branch) -> proto::Branch {
 fn worktree_to_proto(worktree: &git::repository::Worktree) -> proto::Worktree {
     proto::Worktree {
         path: worktree.path.to_string_lossy().to_string(),
-        ref_name: worktree.ref_name.to_string(),
+        ref_name: worktree
+            .ref_name
+            .as_ref()
+            .map(|s| s.to_string())
+            .unwrap_or_default(),
         sha: worktree.sha.to_string(),
+        is_main: worktree.is_main,
     }
 }
 
 fn proto_to_worktree(proto: &proto::Worktree) -> git::repository::Worktree {
     git::repository::Worktree {
         path: PathBuf::from(proto.path.clone()),
-        ref_name: proto.ref_name.clone().into(),
+        ref_name: Some(SharedString::from(&proto.ref_name)),
         sha: proto.sha.clone().into(),
+        is_main: proto.is_main,
     }
 }
 
@@ -7083,47 +7278,124 @@ fn proto_to_commit_details(proto: &proto::GitCommitDetails) -> CommitDetails {
     }
 }
 
+/// This snapshot computes the repository state on the foreground thread while
+/// running the git commands on the background thread. We update branch, head,
+/// remotes, and worktrees first so the UI can react sooner, then compute file
+/// state and emit those events immediately after.
 async fn compute_snapshot(
-    id: RepositoryId,
-    work_directory_abs_path: Arc<Path>,
-    prev_snapshot: RepositorySnapshot,
+    this: Entity<Repository>,
     backend: Arc<dyn GitRepository>,
-) -> Result<(RepositorySnapshot, Vec<RepositoryEvent>)> {
-    let mut events = Vec::new();
-    let branches = backend.branches().await?;
+    cx: &mut AsyncApp,
+) -> Result<RepositorySnapshot> {
+    let (id, work_directory_abs_path, prev_snapshot) = this.update(cx, |this, _| {
+        this.paths_needing_status_update.clear();
+        (
+            this.id,
+            this.work_directory_abs_path.clone(),
+            this.snapshot.clone(),
+        )
+    });
+
+    let head_commit_future = {
+        let backend = backend.clone();
+        async move {
+            Ok(match backend.head_sha().await {
+                Some(head_sha) => backend.show(head_sha).await.log_err(),
+                None => None,
+            })
+        }
+    };
+    let (branches, head_commit, all_worktrees) = cx
+        .background_spawn({
+            let backend = backend.clone();
+            async move {
+                futures::future::try_join3(
+                    backend.branches(),
+                    head_commit_future,
+                    backend.worktrees(),
+                )
+                .await
+            }
+        })
+        .await?;
     let branch = branches.into_iter().find(|branch| branch.is_head);
-
-    // Useful when branch is None in detached head state
-    let head_commit = match backend.head_sha().await {
-        Some(head_sha) => backend.show(head_sha).await.log_err(),
-        None => None,
-    };
-
-    let diff_stat_future: BoxFuture<'_, Result<status::GitDiffStat>> = if head_commit.is_some() {
-        backend.diff_stat(&[])
-    } else {
-        future::ready(Ok(status::GitDiffStat {
-            entries: Arc::default(),
-        }))
-        .boxed()
-    };
-    let (statuses, diff_stats, all_worktrees) = futures::future::try_join3(
-        backend.status(&[RepoPath::from_rel_path(
-            &RelPath::new(".".as_ref(), PathStyle::local()).unwrap(),
-        )]),
-        diff_stat_future,
-        backend.worktrees(),
-    )
-    .await?;
 
     let linked_worktrees: Arc<[GitWorktree]> = all_worktrees
         .into_iter()
         .filter(|wt| wt.path != *work_directory_abs_path)
         .collect();
 
+    let (remote_origin_url, remote_upstream_url) = cx
+        .background_spawn({
+            let backend = backend.clone();
+            async move {
+                Ok::<_, anyhow::Error>(
+                    futures::future::join(
+                        backend.remote_url("origin"),
+                        backend.remote_url("upstream"),
+                    )
+                    .await,
+                )
+            }
+        })
+        .await?;
+
+    let snapshot = this.update(cx, |this, cx| {
+        let branch_changed =
+            branch != this.snapshot.branch || head_commit != this.snapshot.head_commit;
+        let worktrees_changed = *linked_worktrees != *this.snapshot.linked_worktrees;
+
+        this.snapshot = RepositorySnapshot {
+            id,
+            work_directory_abs_path,
+            branch,
+            head_commit,
+            remote_origin_url,
+            remote_upstream_url,
+            linked_worktrees,
+            scan_id: prev_snapshot.scan_id + 1,
+            ..prev_snapshot
+        };
+
+        if branch_changed {
+            cx.emit(RepositoryEvent::BranchChanged);
+        }
+
+        if worktrees_changed {
+            cx.emit(RepositoryEvent::GitWorktreeListChanged);
+        }
+
+        this.snapshot.clone()
+    });
+
+    let (statuses, diff_stats, stash_entries) = cx
+        .background_spawn({
+            let backend = backend.clone();
+            let snapshot = snapshot.clone();
+            async move {
+                let diff_stat_future: BoxFuture<'_, Result<status::GitDiffStat>> =
+                    if snapshot.head_commit.is_some() {
+                        backend.diff_stat(&[])
+                    } else {
+                        future::ready(Ok(status::GitDiffStat {
+                            entries: Arc::default(),
+                        }))
+                        .boxed()
+                    };
+                futures::future::try_join3(
+                    backend.status(&[RepoPath::from_rel_path(
+                        &RelPath::new(".".as_ref(), PathStyle::local()).unwrap(),
+                    )]),
+                    diff_stat_future,
+                    backend.stash_entries(),
+                )
+                .await
+            }
+        })
+        .await?;
+
     let diff_stat_map: HashMap<&RepoPath, DiffStat> =
         diff_stats.entries.iter().map(|(p, s)| (p, *s)).collect();
-    let stash_entries = backend.stash_entries().await?;
     let mut conflicted_paths = Vec::new();
     let statuses_by_path = SumTree::from_iter(
         statuses.entries.iter().map(|(repo_path, status)| {
@@ -7138,42 +7410,35 @@ async fn compute_snapshot(
         }),
         (),
     );
-    let mut merge_details = prev_snapshot.merge;
-    let conflicts_changed = merge_details.update(&backend, conflicted_paths).await?;
+
+    let merge_details = cx
+        .background_spawn({
+            let backend = backend.clone();
+            let mut merge_details = snapshot.merge.clone();
+            async move {
+                let conflicts_changed = merge_details.update(&backend, conflicted_paths).await?;
+                Ok::<_, anyhow::Error>((merge_details, conflicts_changed))
+            }
+        })
+        .await?;
+    let (merge_details, conflicts_changed) = merge_details;
     log::debug!("new merge details: {merge_details:?}");
 
-    if conflicts_changed || statuses_by_path != prev_snapshot.statuses_by_path {
-        events.push(RepositoryEvent::StatusesChanged)
-    }
+    Ok(this.update(cx, |this, cx| {
+        if conflicts_changed || statuses_by_path != this.snapshot.statuses_by_path {
+            cx.emit(RepositoryEvent::StatusesChanged);
+        }
+        if stash_entries != this.snapshot.stash_entries {
+            cx.emit(RepositoryEvent::StashEntriesChanged);
+        }
 
-    if branch != prev_snapshot.branch || head_commit != prev_snapshot.head_commit {
-        events.push(RepositoryEvent::BranchChanged);
-    }
+        this.snapshot.scan_id += 1;
+        this.snapshot.merge = merge_details;
+        this.snapshot.statuses_by_path = statuses_by_path;
+        this.snapshot.stash_entries = stash_entries;
 
-    if *linked_worktrees != *prev_snapshot.linked_worktrees {
-        events.push(RepositoryEvent::GitWorktreeListChanged);
-    }
-
-    let remote_origin_url = backend.remote_url("origin").await;
-    let remote_upstream_url = backend.remote_url("upstream").await;
-
-    let snapshot = RepositorySnapshot {
-        id,
-        statuses_by_path,
-        work_directory_abs_path,
-        original_repo_abs_path: prev_snapshot.original_repo_abs_path,
-        path_style: prev_snapshot.path_style,
-        scan_id: prev_snapshot.scan_id + 1,
-        branch,
-        head_commit,
-        merge: merge_details,
-        remote_origin_url,
-        remote_upstream_url,
-        stash_entries,
-        linked_worktrees,
-    };
-
-    Ok((snapshot, events))
+        this.snapshot.clone()
+    }))
 }
 
 fn status_from_proto(

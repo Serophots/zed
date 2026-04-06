@@ -36,7 +36,10 @@ async fn test_fake_worktree_lifecycle(cx: &mut TestAppContext) {
     assert_eq!(worktrees.len(), 2);
     assert_eq!(worktrees[0].path, PathBuf::from("/project"));
     assert_eq!(worktrees[1].path, worktree_1_dir);
-    assert_eq!(worktrees[1].ref_name.as_ref(), "refs/heads/feature-branch");
+    assert_eq!(
+        worktrees[1].ref_name,
+        Some("refs/heads/feature-branch".into())
+    );
     assert_eq!(worktrees[1].sha.as_ref(), "abc123");
 
     // Directory should exist in FakeFs after create
@@ -152,7 +155,10 @@ async fn test_checkpoints(executor: BackgroundExecutor) {
             .unwrap()
     );
 
-    repository.restore_checkpoint(checkpoint_1).await.unwrap();
+    repository
+        .restore_checkpoint(checkpoint_1.clone())
+        .await
+        .unwrap();
     assert_eq!(
         fs.files_with_contents(Path::new("")),
         [
@@ -161,4 +167,22 @@ async fn test_checkpoints(executor: BackgroundExecutor) {
             (Path::new(path!("/foo/b")).into(), b"ipsum".into())
         ]
     );
+
+    // diff_checkpoints: identical checkpoints produce empty diff
+    let diff = repository
+        .diff_checkpoints(checkpoint_2.clone(), checkpoint_3.clone())
+        .await
+        .unwrap();
+    assert!(
+        diff.is_empty(),
+        "identical checkpoints should produce empty diff"
+    );
+
+    // diff_checkpoints: different checkpoints produce non-empty diff
+    let diff = repository
+        .diff_checkpoints(checkpoint_1.clone(), checkpoint_2.clone())
+        .await
+        .unwrap();
+    assert!(diff.contains("b"), "diff should mention changed file 'b'");
+    assert!(diff.contains("c"), "diff should mention added file 'c'");
 }

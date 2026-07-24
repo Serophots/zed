@@ -758,15 +758,6 @@ rayon = "1.8"
 raw-window-handle = "0.6"
 regex = "1.5"
 # WARNING: If you change this, you must also publish a new version of zed-reqwest to crates.io
-reqwest = { git = "https://github.com/zed-industries/reqwest.git", rev = "c15662463bda39148ba154100dd44d3fba5873a4", default-features = false, features = [
-    "charset",
-    "http2",
-    "macos-system-configuration",
-    "multipart",
-    "rustls-tls-native-roots",
-    "socks",
-    "stream",
-], package = "zed-reqwest", version = "0.12.15-zed" }
 resvg = { version = "0.46.0", default-features = false, features = [
     "text",
     "system-fonts",
@@ -890,6 +881,19 @@ yaml-rust2 = "0.8"
 yawc = { git = "https://github.com/zed-industries/yawc", rev = "71a452f551cac178367eaac5d7418a09afa1f3a2", version = "0.3.3" }
 zeroize = "1.8"
 zstd = "0.11"
+
+
+
+unicode-bidi = "0.3"
+reqwest = { version = "0.13", default-features = false, features = [
+    "charset",
+    "http2",
+    "multipart",
+    "rustls",
+    "socks",
+    "stream",
+] }
+
 
 [workspace.dependencies.windows]
 version = "0.61"
